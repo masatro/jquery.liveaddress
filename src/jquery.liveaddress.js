@@ -38,7 +38,9 @@
 		ambiguousMessage: "Choose the correct address",							// Message when address is ambiguous
 		invalidMessage: "Address not verified",									// Message when address is invalid
 		fieldSelector: "input[type=text], input:not([type]), textarea, select",	// Selector for possible address-related form elements
-		submitSelector: "[type=submit], [type=image], [type=button]:last, button:last"	// Selector to find a likely submit button or submit image (in a form)
+		submitSelector: "[type=submit], [type=image], [type=button]:last, button:last",	// Selector to find a likely submit button or submit image (in a form)
+		missingSecondaryMessage: "Address missing secondary information (apartment/suite/unit number)", // Message when address is missing secondary data
+		requireSecondary: true                                                 // Require Secondary Data when needed (default is to not require it)
 	};
 	var config = {};				// Configuration settings as set by the user or just the defaults
 	var forms = [];					// List of forms (which hold lists of addresses)
@@ -113,6 +115,8 @@
 		config.stateFilter = typeof config.stateFilter === 'undefined' ? "" : config.stateFilter;
 		config.cityStatePreference = typeof config.cityStatePreference === 'undefined' ? "" : config.cityStatePreference;
 		config.geolocate = typeof config.geolocate === 'undefined' ? true : config.geolocate;
+		config.missingSecondaryMessage = config.missingSecondaryMessage || defaults.missingSecondaryMessage;
+		config.requireSecondary = typeof config.requireSecondary === 'undefined' ? defaults.requireSecondary : config.requireSecondary;
 
 		config.candidates = config.candidates < 1 ? 0 : (config.candidates > 10 ? 10 : config.candidates);
 
@@ -1540,6 +1544,108 @@
 				userAborted($(this).parents('.smarty-popup'), e);
 			});
 		};
+		
+		
+		this.showAmbiguous = function(data)
+		{
+			if (!config.ui || !data.address.hasDomFields())
+				return;
+
+			var addr = data.address;
+			var response = data.response;
+			var corners = addr.corners();
+			corners.width = Math.max(corners.width, 300); 	// minimum width
+			corners.height = Math.max(corners.height, response.length * 63 + 119);	// minimum height
+
+			var html = '<div class="smarty-ui" style="top: '+corners.top+'px; left: '+corners.left+'px; width: '+corners.width+'px; height: '+corners.height+'px;">'
+				+ '<div class="smarty-popup smarty-addr-'+addr.id()+'" style="width: '+(corners.width - 6)+'px; height: '+(corners.height - 3)+'px;">'
+				+ '<div class="smarty-popup-header smarty-popup-ambiguous-header">'+config.ambiguousMessage+'<a href="javascript:" class="smarty-popup-close smarty-abort" title="Cancel">x</a></div>'
+				+ '<div class="smarty-choice-list">';
+
+			for (var i = 0; i < response.raw.length; i++)
+			{
+				var line1 = response.raw[i].delivery_line_1, city = response.raw[i].components.city_name,
+					st = response.raw[i].components.state_abbreviation,
+					zip = response.raw[i].components.zipcode + "-" + response.raw[i].components.plus4_code;
+				html += '<a href="javascript:" class="smarty-choice" data-index="'+i+'">'+line1+'<br>'+city+', '+st+' '+zip+'</a>';
+			}
+
+			html += '</div><div class="smarty-choice-alt">';
+			html += '<a href="javascript:" class="smarty-choice smarty-choice-abort smarty-abort">Click here to change your address</a>';
+			html += '<a href="javascript:" class="smarty-choice smarty-choice-override">Click here to certify the address is correct<br>('+addr.toString()+')</a>';
+			html += '</div></div></div>';
+			$(html).hide().appendTo('body').show(defaults.speed);
+
+			// Scroll to it if needed
+			if ($(document).scrollTop() > corners.top - 100
+				|| $(document).scrollTop() < corners.top - $(window).height() + 100)
+			{
+				$('html, body').stop().animate({
+					scrollTop: $('.smarty-popup.smarty-addr-'+addr.id()).offset().top - 100
+				}, 500);
+			}
+
+			data.selectors = {
+				goodAddr: '.smarty-popup.smarty-addr-'+addr.id()+' .smarty-choice-list .smarty-choice',
+				useOriginal: '.smarty-popup.smarty-addr-'+addr.id()+' .smarty-choice-override',
+				abort: '.smarty-popup.smarty-addr-'+addr.id()+' .smarty-abort'
+			};
+
+			// User chose a candidate address
+			$('body').delegate(data.selectors.goodAddr, 'click', data, function(e)
+			{
+				$('.smarty-popup.smarty-addr-'+addr.id()).slideUp(defaults.speed, function()
+				{
+					$(this).parent('.smarty-ui').remove();
+					$(this).remove();
+				});
+
+				undelegateAllClicks(e.data.selectors);
+				delete e.data.selectors;
+
+				trigger("UsedSuggestedAddress", {
+					address: e.data.address,
+					response: e.data.response,
+					invoke: e.data.invoke,
+					invokeFn: e.data.invokeFn,
+					chosenCandidate: response.raw[$(this).data('index')]
+				});
+			});
+
+			// User wants to revert to what they typed (forced accept)
+			$('body').delegate(data.selectors.useOriginal, 'click', data, function(e)
+			{
+				$(this).parents('.smarty-popup').slideUp(defaults.speed, function()
+				{
+					$(this).parent('.smarty-ui').remove();
+					$(this).remove();
+				});
+
+				undelegateAllClicks(e.data.selectors);
+				delete e.data.selectors;
+				trigger("OriginalInputSelected", e.data);
+			});
+
+			// User presses Esc key
+			$(document).keyup(data, function(e)
+			{
+				if (e.keyCode == 27) //Esc
+				{
+					undelegateAllClicks(e.data.selectors);
+					delete e.data.selectors;
+					userAborted($('.smarty-popup.smarty-addr-'+e.data.address.id()), e);
+					suppress(e);
+				}
+			});
+
+			// User clicks "x" in corner or chooses to try a different address (same effect as Esc key)
+			$('body').delegate(data.selectors.abort, 'click', data, function(e)
+			{
+				undelegateAllClicks(e.data.selectors);
+				delete e.data.selectors;
+				userAborted($(this).parents('.smarty-popup'), e);
+			});
+		};
 
 
 		this.showInvalid = function(data)
@@ -2325,6 +2431,8 @@
 			{
 				if (data.response.isInvalid())
 					trigger("AddressWasInvalid", data);
+				else if (config.requireSecondary && data.response.isMissingSecondary())
+					trigger("AddressMissingSecondary", data)
 				else if (data.response.isValid())
 					trigger("AddressWasValid", data);
 				else
@@ -2359,6 +2467,14 @@
 			data.response.chosen = resp.raw[0];
 			addr.replaceWith(resp.raw[0], true, event);
 			addr.accept(data);
+		},
+		
+		AddressMissingSecondary: function(event, data)
+		{
+			if (config.debug)
+				console.log("EVENT:", "AddressMissingSecondary", "(Response indicates input address was missing secondary)", event, data);
+			
+			ui.showMissingSecondary(data)
 		},
 
 		AddressWasAmbiguous: function(event, data)
@@ -2403,6 +2519,17 @@
 			if (data.address.form)
 				delete data.address.form.processing;	// We're done with this address and ready for the next, potentially
 
+			trigger("Completed", data);
+		},
+		
+		MissingSecondaryRejected: function(event, data)
+		{
+			if (config.debug)
+				console.log("EVENT:", "MissingSecondaryRejected", "(User chose to correct an invalid address)", event, data);
+			
+			if (data.address.form)
+				delete data.address.form.processing;  // We're done with this address and ready for the next, potentially
+			
 			trigger("Completed", data);
 		},
 
